@@ -1,0 +1,224 @@
+// ************************ SETTING UP THE ENVIRONMENT
+USE ROLE ACCOUNTADMIN;
+CREATE WAREHOUSE IF NOT EXISTS DATALAKE_WH
+WITH 
+WAREHOUSE_SIZE = 'X-SMALL'
+MAX_CLUSTER_COUNT = 20
+SCALING_POLICY = 'STANDARD';
+
+
+// ************************ CREATING LANDING WORKSPACE FOR CRICKETINFO IPL DATA
+CREATE DATABASE IF NOT EXISTS CRICKETINFO_DB;
+CREATE SCHEMA IF NOT EXISTS IN_IPL WITH MANAGED ACCESS;
+
+-- Storage Integration Creation
+CREATE OR REPLACE STORAGE INTEGRATION ADLS_CRICKETINFO_INT
+  TYPE = EXTERNAL_STAGE
+  STORAGE_PROVIDER = 'AZURE'
+  ENABLED = TRUE
+  AZURE_TENANT_ID = '33f68f95-8baf-4026-8cff-9cd65f5a75ae'
+  STORAGE_ALLOWED_LOCATIONS = ('azure://divyanshsaxena.blob.core.windows.net/cricketinfo');
+
+-- Fetching the AZURE_CONSENT_URL and AZURE_MULTI_TENANT_APP_NAME to update IAM role
+DESC INTEGRATION ADLS_CRICKETINFO_INT;
+
+
+-- Validating the storage integration
+SELECT
+  SYSTEM$VALIDATE_STORAGE_INTEGRATION(
+    'ADLS_CRICKETINFO_INT',
+    'azure://divyanshsaxena.blob.core.windows.net/cricketinfo/series/',
+    'series_data_2025-03-31.csv', 'read');
+
+
+CREATE STAGE IF NOT EXISTS CRICKETINFO_STG
+  URL = 'azure://divyanshsaxena.blob.core.windows.net/cricketinfo/'
+  STORAGE_INTEGRATION = ADLS_CRICKETINFO_INT;
+
+LIST @CRICKETINFO_STG;
+
+// ************************ SETTING UP AUTO INGESTION OF DATA USING SNOWPIPE
+
+-- File format creation
+CREATE FILE FORMAT IF NOT EXISTS MY_CSV_FORMAT
+TYPE = CSV
+PARSE_HEADER = TRUE
+FIELD_OPTIONALLY_ENCLOSED_BY = '"';
+
+
+-- Table creation based on the source csv file schema
+CREATE TABLE IF NOT EXISTS MATCH_SQUAD
+USING TEMPLATE (
+    SELECT ARRAY_AGG(OBJECT_CONSTRUCT(*))
+    FROM TABLE(
+        INFER_SCHEMA(
+          LOCATION=>'@CRICKETINFO_STG/matches/match_squad/',
+          FILE_FORMAT=>'MY_CSV_FORMAT'
+        )
+    )
+);
+-- Enabling Schema evolution 
+ALTER TABLE MATCH_SQUAD SET ENABLE_SCHEMA_EVOLUTION = TRUE;
+
+-- Table creation based on the source csv file schema
+CREATE TABLE IF NOT EXISTS MATCHES_DATA
+USING TEMPLATE (
+    SELECT ARRAY_AGG(OBJECT_CONSTRUCT(*))
+    FROM TABLE(
+        INFER_SCHEMA(
+          LOCATION=>'@CRICKETINFO_STG/matches/matches_data/',
+          FILE_FORMAT=>'MY_CSV_FORMAT'
+        )
+    )
+);
+-- Enabling Schema evolution 
+ALTER TABLE MATCHES_DATA SET ENABLE_SCHEMA_EVOLUTION = TRUE;
+
+-- Table creation based on the source csv file schema
+CREATE TABLE IF NOT EXISTS MATCHES_DATA_BBB
+USING TEMPLATE (
+    SELECT ARRAY_AGG(OBJECT_CONSTRUCT(*))
+    FROM TABLE(
+        INFER_SCHEMA(
+          LOCATION=>'@CRICKETINFO_STG/matches/matches_data_bbb/',
+          FILE_FORMAT=>'MY_CSV_FORMAT'
+        )
+    )
+);
+-- Enabling Schema evolution 
+ALTER TABLE MATCHES_DATA_BBB SET ENABLE_SCHEMA_EVOLUTION = TRUE;
+
+-- Table creation based on the source csv file schema
+CREATE TABLE IF NOT EXISTS SERIES
+USING TEMPLATE (
+    SELECT ARRAY_AGG(OBJECT_CONSTRUCT(*))
+    FROM TABLE(
+        INFER_SCHEMA(
+          LOCATION=>'@CRICKETINFO_STG/series/series_data/',
+          FILE_FORMAT=>'MY_CSV_FORMAT'
+        )
+    )
+);
+-- Enabling Schema evolution 
+ALTER TABLE SERIES SET ENABLE_SCHEMA_EVOLUTION = TRUE;
+
+-- Table creation based on the source csv file schema
+CREATE TABLE IF NOT EXISTS SERIES_SQUAD
+USING TEMPLATE (
+    SELECT ARRAY_AGG(OBJECT_CONSTRUCT(*))
+    FROM TABLE(
+        INFER_SCHEMA(
+          LOCATION=>'@CRICKETINFO_STG/series/series_squad_data/',
+          FILE_FORMAT=>'MY_CSV_FORMAT'
+        )
+    )
+);
+-- Enabling Schema evolution 
+ALTER TABLE SERIES_SQUAD SET ENABLE_SCHEMA_EVOLUTION = TRUE;
+
+-- validation of the tables
+select * from match_squad;
+select * from matches_data;
+select * from matches_data_bbb;
+select * from series;
+select * from series_squad;
+
+-- Create a notification integration for event grid
+CREATE NOTIFICATION INTEGRATION EVENTGRID_CRICKETINFO_INT
+  ENABLED = true
+  TYPE = QUEUE
+  NOTIFICATION_PROVIDER = AZURE_STORAGE_QUEUE
+  AZURE_STORAGE_QUEUE_PRIMARY_URI = 'https://divyanshsaxena.queue.core.windows.net/snowpipe'
+  AZURE_TENANT_ID = '33f68f95-8baf-4026-8cff-9cd65f5a75ae'
+  ;
+
+DESC INTEGRATION EVENTGRID_CRICKETINFO_INT;
+
+CREATE OR REPLACE PIPE MATCH_SQUAD_PIPE
+  AUTO_INGEST = TRUE
+  INTEGRATION = 'EVENTGRID_CRICKETINFO_INT'
+  AS
+    COPY INTO CRICKETINFO_DB.IN_IPL.MATCH_SQUAD
+      FROM @CRICKETINFO_DB.IN_IPL.CRICKETINFO_STG/matches/match_squad/
+      FILE_FORMAT = MY_CSV_FORMAT
+      MATCH_BY_COLUMN_NAME = CASE_INSENSITIVE;
+
+-- Getting the notification channel to create a set it up at adls bucket
+DESC PIPE MATCH_SQUAD_PIPE;
+
+-- Triggering Pipeline to load existing data
+ALTER PIPE MATCH_SQUAD_PIPE REFRESH;
+SELECT SYSTEM$PIPE_STATUS( 'MATCH_SQUAD_PIPE');
+
+
+CREATE OR REPLACE PIPE MATCHES_DATA_PIPE
+  AUTO_INGEST = TRUE
+  INTEGRATION = 'EVENTGRID_CRICKETINFO_INT'
+  AS
+    COPY INTO CRICKETINFO_DB.IN_IPL.MATCHES_DATA
+      FROM @CRICKETINFO_DB.IN_IPL.CRICKETINFO_STG/matches/matches_data/
+      FILE_FORMAT = MY_CSV_FORMAT
+      MATCH_BY_COLUMN_NAME = CASE_INSENSITIVE;
+
+-- Getting the notification channel to create a set it up at adls bucket
+DESC PIPE MATCHES_DATA_PIPE;
+
+-- Triggering Pipeline to load existing data
+ALTER PIPE MATCHES_DATA_PIPE REFRESH;
+SELECT SYSTEM$PIPE_STATUS( 'MATCHES_DATA_PIPE');
+
+
+CREATE OR REPLACE PIPE MATCHES_DATA_BBB_PIPE
+  AUTO_INGEST = TRUE
+  INTEGRATION = 'EVENTGRID_CRICKETINFO_INT'
+  AS
+    COPY INTO CRICKETINFO_DB.IN_IPL.MATCHES_DATA_BBB
+      FROM @CRICKETINFO_DB.IN_IPL.CRICKETINFO_STG/matches/matches_data_bbb/
+      FILE_FORMAT = MY_CSV_FORMAT
+      MATCH_BY_COLUMN_NAME = CASE_INSENSITIVE;
+
+-- Getting the notification channel to create a set it up at adls bucket
+DESC PIPE MATCHES_DATA_BBB_PIPE;
+
+-- Triggering Pipeline to load existing data
+ALTER PIPE MATCHES_DATA_BBB_PIPE REFRESH;
+SELECT SYSTEM$PIPE_STATUS( 'MATCHES_DATA_BBB_PIPE');
+
+CREATE OR REPLACE PIPE SERIES_DATA_PIPE
+  AUTO_INGEST = TRUE
+  INTEGRATION = 'EVENTGRID_CRICKETINFO_INT'
+  AS
+    COPY INTO CRICKETINFO_DB.IN_IPL.SERIES
+      FROM @CRICKETINFO_DB.IN_IPL.CRICKETINFO_STG/series/series_data/
+      FILE_FORMAT = MY_CSV_FORMAT
+      MATCH_BY_COLUMN_NAME = CASE_INSENSITIVE;
+
+-- Getting the notification channel to create a set it up at adls bucket
+DESC PIPE SERIES_DATA_PIPE;
+
+-- Triggering Pipeline to load existing data
+ALTER PIPE SERIES_DATA_PIPE REFRESH;
+SELECT SYSTEM$PIPE_STATUS( 'SERIES_DATA_PIPE');
+
+CREATE OR REPLACE PIPE SERIES_SQUAD_DATA_PIPE
+  AUTO_INGEST = TRUE
+  INTEGRATION = 'EVENTGRID_CRICKETINFO_INT'
+  AS
+    COPY INTO CRICKETINFO_DB.IN_IPL.SERIES_SQUAD
+      FROM @CRICKETINFO_DB.IN_IPL.CRICKETINFO_STG/series/series_squad_data/
+      FILE_FORMAT = MY_CSV_FORMAT
+      MATCH_BY_COLUMN_NAME = CASE_INSENSITIVE;
+
+-- Getting the notification channel to create a set it up at adls bucket
+DESC PIPE SERIES_SQUAD_DATA_PIPE;
+
+-- Triggering Pipeline to load existing data
+ALTER PIPE SERIES_SQUAD_DATA_PIPE REFRESH;
+SELECT SYSTEM$PIPE_STATUS( 'SERIES_SQUAD_DATA_PIPE');
+
+SELECT * FROM MATCH_SQUAD;
+SELECT * FROM MATCHES_DATA;
+SELECT * FROM MATCHES_DATA_BBB;
+SELECT * FROM SERIES;
+SELECT * FROM SERIES_SQUAD;
+// XXXXXXXXXXXXXXXXXXXXXX Landing Setup has been completed successfully XXXXXXXXXXXXXXXXXXXXXX

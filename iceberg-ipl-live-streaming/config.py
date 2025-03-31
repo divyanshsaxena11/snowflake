@@ -1,0 +1,5 @@
+series_id = "d5a498c8-7596-4b93-8ab0-e0efc3345312"
+api_key_1 = "eb2dc5cf-7610-452d-b329-19d1ecc97576"
+api_key_2 = "36bc0c79-07da-4e14-b129-a8d0de4c39a6"
+api_key_3 = "51af2148-1ea7-4241-b875-aede558a8977"
+api_key_4 = "8ba5c543-ca58-428e-bbc5-aac35ee20611"
